@@ -1,7 +1,7 @@
-// ===== ÉP LINKER DÙNG CONSOLE SUBSYSTEM (tránh lỗi WinMain) =====
+// ===== ÉP LINKER DÙNG CONSOLE SUBSYSTEM =====
 #pragma comment(linker, "/SUBSYSTEM:CONSOLE")
 #pragma comment(linker, "/ENTRY:mainCRTStartup")
-// ================================================================
+// ============================================
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstdio>
 
 // ============================================================
 //  LuxPower protocol
@@ -44,8 +45,8 @@ static uint16_t crc16(const uint8_t* buf, size_t len) {
 
 static std::vector<uint8_t> buildReadInputFrame(uint16_t startAddr, uint16_t count, uint16_t protocol) {
     uint8_t cmd[18] = {0};
-    cmd[0] = 0;                 // address
-    cmd[1] = 4;                 // function R_INPUT
+    cmd[0] = 0;
+    cmd[1] = 4;
     memcpy(cmd + 2, EMPTY_INVERTER_SN, 10);
     cmd[12] = (uint8_t)(startAddr & 0xFF);
     cmd[13] = (uint8_t)(startAddr >> 8);
@@ -69,7 +70,7 @@ static std::vector<uint8_t> buildReadInputFrame(uint16_t startAddr, uint16_t cou
     frame[4] = (uint8_t)(payloadLen & 0xFF);
     frame[5] = (uint8_t)(payloadLen >> 8);
     frame[6] = 1;
-    frame[7] = 194;             // TRANSLATE
+    frame[7] = 194;
     memcpy(frame.data() + 8, td.data(), td.size());
     return frame;
 }
@@ -78,6 +79,12 @@ static int getRegister2(const std::vector<uint8_t>& frame, int index) {
     int p = index * 2 + 35;
     if (p + 1 >= (int)frame.size()) return 0;
     return (frame[p + 1] << 8) | frame[p];
+}
+
+static uint32_t getRegister32(const std::vector<uint8_t>& frame, int loIdx, int hiIdx) {
+    uint32_t lo = (uint32_t)getRegister2(frame, loIdx);
+    uint32_t hi = (uint32_t)getRegister2(frame, hiIdx);
+    return (hi << 16) | lo;
 }
 
 } // namespace lux
@@ -89,6 +96,7 @@ struct SharedState {
     std::mutex mtx;
 
     float pv = 0.f, consumption = 0.f, grid = 0.f, battery = 0.f;
+    float pvToday = 0.f, loadToday = 0.f, gridToday = 0.f, battToday = 0.f;
     int   soc = 0;
     bool  connected = false;
     bool  online    = false;
@@ -117,7 +125,7 @@ struct SharedState {
 };
 
 // ============================================================
-//  LuxClient – background thread
+//  LuxClient
 // ============================================================
 class LuxClient {
 public:
@@ -163,7 +171,7 @@ private:
 
             auto lastSend = std::chrono::steady_clock::now() - std::chrono::seconds(10);
             auto sendRead = [&]() {
-                auto frame = lux::buildReadInputFrame(0, 40, (uint16_t)protocol_);
+                auto frame = lux::buildReadInputFrame(0, 60, (uint16_t)protocol_);
                 send(s, (const char*)frame.data(), (int)frame.size(), 0);
                 lastSend = std::chrono::steady_clock::now();
             };
@@ -171,7 +179,7 @@ private:
 
             while (running_) {
                 fd_set rfds; FD_ZERO(&rfds); FD_SET(s, &rfds);
-                timeval tv{0, 150000}; // 150 ms
+                timeval tv{0, 150000};
                 int rv = select(0, &rfds, nullptr, nullptr, &tv);
                 if (rv > 0 && FD_ISSET(s, &rfds)) {
                     uint8_t tmp[4096];
@@ -210,6 +218,7 @@ private:
             buf.erase(buf.begin(), buf.begin() + fullLen);
 
             if (frame.size() > 7 && frame[7] == 194) {
+                // --- Power (W) ---
                 int r7  = lux::getRegister2(frame, 7);
                 int r8  = lux::getRegister2(frame, 8);
                 int r9  = lux::getRegister2(frame, 9);
@@ -217,17 +226,46 @@ private:
                 int inInv   = lux::getRegister2(frame, 17);
                 int outGrid = lux::getRegister2(frame, 26);
                 int inGrid  = lux::getRegister2(frame, 27);
-                int soc = lux::getRegister2(frame, 5);   // thử index 5 trước
 
-               float pv = (float)(r7 + r8 + r9);
-               float cons = (float)(outInv - inInv) + (float)(inGrid - outGrid);
+                // --- SOC (register 5, 0-100%) ---
+                int soc = lux::getRegister2(frame, 5);
+                if (soc > 100) soc = soc / 10;
+                if (soc < 0 || soc > 100) soc = 0;
+
+                float pv = (float)(r7 + r8 + r9);
+                float cons = (float)(outInv - inInv) + (float)(inGrid - outGrid);
                 if (cons < 0) cons = 0;
 
-// Sanity check: giới hạn giá trị hợp lý
-if (pv   < 0 || pv   > 20000) return;   // PV tối đa 20kW
-if (cons < 0 || cons > 30000) return;   // Load tối đa 30kW
+                // Sanity check
+                if (pv < 0 || pv > 50000) return;
+                if (cons < 0 || cons > 50000) return;
+
                 float grid = (float)(outGrid - inGrid);
                 float batt = (float)(outInv - inInv);
+
+                // --- Sản lượng hôm nay (32-bit, đơn vị 0.1 kWh) ---
+                // Thử các register phổ biến của LuxPower
+                auto r32 = [&](int lo, int hi) -> float {
+                    return (float)lux::getRegister32(frame, lo, hi) * 0.1f;
+                };
+
+                float pvToday   = r32(20, 21);   // Yield today
+                float expToday  = r32(22, 23);   // Export today
+                float impToday  = r32(24, 25);   // Import today
+                float loadToday = r32(28, 29);   // Load today
+                float chgToday  = r32(30, 31);   // Charge today
+                float disToday  = r32(32, 33);   // Discharge today
+
+                // Clamp giá trị bất thường
+                if (pvToday   < 0 || pvToday   > 1000) pvToday   = 0;
+                if (loadToday < 0 || loadToday > 1000) loadToday = 0;
+                if (expToday  < 0 || expToday  > 1000) expToday  = 0;
+                if (impToday  < 0 || impToday  > 1000) impToday  = 0;
+                if (chgToday  < 0 || chgToday  > 1000) chgToday  = 0;
+                if (disToday  < 0 || disToday  > 1000) disToday  = 0;
+
+                float gridToday = impToday - expToday;
+                float battToday = disToday - chgToday;
 
                 double now = std::chrono::duration<double>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -238,6 +276,10 @@ if (cons < 0 || cons > 30000) return;   // Load tối đa 30kW
                 state_->grid = grid;
                 state_->battery = batt;
                 state_->soc = soc;
+                state_->pvToday   = pvToday;
+                state_->loadToday = loadToday;
+                state_->gridToday = gridToday;
+                state_->battToday = battToday;
                 state_->online = true;
                 state_->lastError.clear();
                 state_->pushHistory(now, pv, cons, grid, batt);
@@ -362,7 +404,6 @@ static void ChartCard(const char* id, const char* title, ImU32 lineCol,
         ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.15f);
 
         if (!t.empty()) {
-            // Ép CẢ HAI trục về double để tránh template ambiguous
             std::vector<double> xs(t.begin(), t.end());
             std::vector<double> ys(v.begin(), v.end());
             double t0 = xs.front();
@@ -375,7 +416,6 @@ static void ChartCard(const char* id, const char* title, ImU32 lineCol,
         ImPlot::EndPlot();
     }
     EndCard();
-
 }
 
 static void DrawFlowPanel(const SharedState& s, ImVec2 size) {
@@ -453,17 +493,14 @@ static void DrawFlowPanel(const SharedState& s, ImVec2 size) {
 //  Main
 // ============================================================
 int main(int argc, char** argv) {
-    // ================== CẤU HÌNH MẶC ĐỊNH ==================
-    std::string host = "192.168.1.20";   //  <-- ĐÃ ĐỔI IP
+    std::string host = "192.168.1.20";
     int port = 8000;
     int protocol = 1;
 
-    // Cho phép override qua CLI:  LuxMonitor.exe <ip> <port> <protocol>
     if (argc > 1) host = argv[1];
     if (argc > 2) port = atoi(argv[2]);
     if (argc > 3) protocol = atoi(argv[3]);
     if (protocol != 1 && protocol != 2) protocol = 1;
-    // =======================================================
 
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -482,12 +519,34 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
+    // ========== FONT: SEGOE UI + TIẾNG VIỆT ĐẦY ĐỦ ==========
     ImFontConfig cfg;
-    cfg.OversampleH = 2; cfg.OversampleV = 2;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 2;
+    cfg.PixelSnapH  = true;
+
+    static const ImWchar glyphRanges[] = {
+        0x0020, 0x00FF,   // Latin cơ bản + %
+        0x0102, 0x0103,   // Ă ă
+        0x0110, 0x0111,   // Đ đ
+        0x0128, 0x0129,   // Ĩ ĩ
+        0x0168, 0x0169,   // Ũ ũ
+        0x01A0, 0x01B0,   // Ơ ơ Ư ư
+        0x1EA0, 0x1EF9,   // Vietnamese Extended
+        0x0300, 0x0301,   // grave + acute
+        0x0303, 0x0309,   // tilde + hook above
+        0x0323, 0x0323,   // dot below
+        0,
+    };
+
     ImFont* fontMain = io.Fonts->AddFontFromFileTTF(
-    "C:/Windows/Fonts/segoeui.ttf", 17.0f, &cfg,
-    io.Fonts->GetGlyphRangesVietnamese());
+        "C:/Windows/Fonts/segoeui.ttf", 17.0f, &cfg, glyphRanges);
+    if (!fontMain) {
+        fontMain = io.Fonts->AddFontFromFileTTF(
+            "C:/Windows/Fonts/arial.ttf", 17.0f, &cfg, glyphRanges);
+    }
     if (!fontMain) io.Fonts->AddFontDefault();
+    // ========================================================
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -560,6 +619,10 @@ int main(int argc, char** argv) {
             snap.pv = state.pv; snap.consumption = state.consumption;
             snap.grid = state.grid; snap.battery = state.battery;
             snap.soc = state.soc;
+            snap.pvToday = state.pvToday;
+            snap.loadToday = state.loadToday;
+            snap.gridToday = state.gridToday;
+            snap.battToday = state.battToday;
             snap.online = state.online; snap.connected = state.connected;
             snap.deviceSn = state.deviceSn; snap.lastError = state.lastError;
             snap.tHist = state.tHist;
@@ -576,21 +639,26 @@ int main(int argc, char** argv) {
             float cardW = (totalW - spacing * 3.f) / 4.f;
             ImVec2 cardSize(cardW, 118);
 
-            char v[32];
+            char v[32], sub[96];
+
             snprintf(v, sizeof(v), "%.0f W", snap.pv);
-            StatCard("##pv", "PV", v, "Sản lượng hôm nay  —", IM_COL32(0,168,112,255), cardSize);
+            snprintf(sub, sizeof(sub), "Sản lượng hôm nay: %.1f kWh", snap.pvToday);
+            StatCard("##pv", "PV", v, sub, IM_COL32(0,168,112,255), cardSize);
             ImGui::SameLine();
 
             snprintf(v, sizeof(v), "%.0f W", snap.consumption);
-            StatCard("##load", "TẢI TIÊU THỤ", v, "Điện tiêu thụ hôm nay  —", IM_COL32(255,138,0,255), cardSize);
+            snprintf(sub, sizeof(sub), "Điện tiêu thụ hôm nay: %.1f kWh", snap.loadToday);
+            StatCard("##load", "TẢI TIÊU THỤ", v, sub, IM_COL32(255,138,0,255), cardSize);
             ImGui::SameLine();
 
             snprintf(v, sizeof(v), "%.0f W", snap.grid);
-            StatCard("##grid", "LƯỚI ĐIỆN", v, "Lấy / Đẩy lưới  —", IM_COL32(52,120,246,255), cardSize);
+            snprintf(sub, sizeof(sub), "Hôm nay: %.1f kWh", snap.gridToday);
+            StatCard("##grid", "LƯỚI ĐIỆN", v, sub, IM_COL32(52,120,246,255), cardSize);
             ImGui::SameLine();
 
             snprintf(v, sizeof(v), "%.0f W", snap.battery);
-            StatCard("##batt", "LƯU TRỮ", v, "SOC  —", IM_COL32(230,60,110,255), cardSize);
+            snprintf(sub, sizeof(sub), "SOC: %d%%  |  Hôm nay: %.1f kWh", snap.soc, snap.battToday);
+            StatCard("##batt", "LƯU TRỮ", v, sub, IM_COL32(230,60,110,255), cardSize);
         }
 
         // ---------- MAIN ROW ----------
