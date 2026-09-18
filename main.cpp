@@ -217,11 +217,15 @@ private:
                 int inInv   = lux::getRegister2(frame, 17);
                 int outGrid = lux::getRegister2(frame, 26);
                 int inGrid  = lux::getRegister2(frame, 27);
-                int soc     = lux::getRegister2(frame, 30);
+                int soc = lux::getRegister2(frame, 5);   // thử index 5 trước
 
-                float pv = (float)(r7 + r8 + r9);
-                float cons = (float)(outInv - inInv) + (float)(inGrid - outGrid);
+               float pv = (float)(r7 + r8 + r9);
+               float cons = (float)(outInv - inInv) + (float)(inGrid - outGrid);
                 if (cons < 0) cons = 0;
+
+// Sanity check: giới hạn giá trị hợp lý
+if (pv   < 0 || pv   > 20000) return;   // PV tối đa 20kW
+if (cons < 0 || cons > 30000) return;   // Load tối đa 30kW
                 float grid = (float)(outGrid - inGrid);
                 float batt = (float)(outInv - inInv);
 
@@ -480,7 +484,9 @@ int main(int argc, char** argv) {
 
     ImFontConfig cfg;
     cfg.OversampleH = 2; cfg.OversampleV = 2;
-    ImFont* fontMain = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 17.0f, &cfg);
+    ImFont* fontMain = io.Fonts->AddFontFromFileTTF(
+    "C:/Windows/Fonts/segoeui.ttf", 17.0f, &cfg,
+    io.Fonts->GetGlyphRangesVietnamese());
     if (!fontMain) io.Fonts->AddFontDefault();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
