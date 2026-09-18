@@ -56,5 +56,5 @@ target_include_directories(imgui_lib PUBLIC
 target_link_libraries(imgui_lib PUBLIC glfw OpenGL::GL)
 
 # ---- Main app ----
-add_executable(LuxMonitor WIN32 main.cpp)
+add_executable(LuxMonitor main.cpp)
 target_link_libraries(LuxMonitor PRIVATE imgui_lib ws2_32)
