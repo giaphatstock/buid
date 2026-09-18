@@ -359,8 +359,9 @@ static void ChartCard(const char* id, const char* title, ImU32 lineCol,
         ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.15f);
 
         if (!t.empty()) {
+            // Ép CẢ HAI trục về double để tránh template ambiguous
             std::vector<double> xs(t.begin(), t.end());
-            std::vector<float>  ys(v.begin(), v.end());
+            std::vector<double> ys(v.begin(), v.end());
             double t0 = xs.front();
             for (auto& x : xs) x -= t0;
             ImPlot::PlotShaded(unit, xs.data(), ys.data(), (int)xs.size(), 0.0);
@@ -371,6 +372,7 @@ static void ChartCard(const char* id, const char* title, ImU32 lineCol,
         ImPlot::EndPlot();
     }
     EndCard();
+
 }
 
 static void DrawFlowPanel(const SharedState& s, ImVec2 size) {
