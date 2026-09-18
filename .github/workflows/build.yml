@@ -9,23 +9,27 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Setup vcpkg
+        shell: cmd
         run: |
-          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          if not exist C:\vcpkg (
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          )
           C:\vcpkg\bootstrap-vcpkg.bat
           C:\vcpkg\vcpkg install glfw3:x64-windows
           C:\vcpkg\vcpkg install "imgui[core,glfw-binding,opengl3-binding,freetype]:x64-windows"
           C:\vcpkg\vcpkg install implot:x64-windows
-        shell: cmd
 
       - name: Configure CMake
+        shell: cmd
         run: |
           cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -A x64
-        shell: cmd
 
       - name: Build
+        shell: cmd
         run: cmake --build build --config Release
 
       - name: Upload EXE
