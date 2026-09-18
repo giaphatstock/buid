@@ -1,8 +1,7 @@
-// ============================================================
-//  LuxPower Monitor - C++ / Dear ImGui Dashboard
-//  Port từ script Node.js (Modbus over TCP, protocol 1/2)
-//  Default IP: 192.168.1.20 : 8000  (protocol 1)
-// ============================================================
+// ===== ÉP LINKER DÙNG CONSOLE SUBSYSTEM (tránh lỗi WinMain) =====
+#pragma comment(linker, "/SUBSYSTEM:CONSOLE")
+#pragma comment(linker, "/ENTRY:mainCRTStartup")
+// ================================================================
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
